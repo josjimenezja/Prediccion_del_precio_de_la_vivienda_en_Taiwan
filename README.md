@@ -1,6 +1,6 @@
 # Prediccion del precio de la vivienda en Taiwan
 ## Actividad 4 - Desiciones bajo incertidumbre
-En este repositorio se exponen los codigos con los que se desarrollaron los dos puntos de la actividad 3, en donde el proposito en ambos ejercicios consistia en intentar optimizar un modelo de regresion lineal y regresion logistica a ojo mediante las herrramientas de R.
+En este repositorio se expone el codigo del RMarkDown donde se desarrollo toda la actividad junto con el desarrollo del documento final publicado para la entrega.
 ### Integrandes del grupo:
 + Lina María Moreno 
 + Juan David Valencia 
