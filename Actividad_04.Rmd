@@ -1,0 +1,469 @@
+---
+title: "Predicción del precio de la vivienda en Taiwan"
+author: "Lina María Moreno <br/> Juan David Valencia<br/> Camilo Andrés Figueroa <br/> Joan Sebastian Jiménez <br/> **Universidad Nacional de Colombia - Sede Medellín <br/> Decisiones bajo incertidumbre (Optimización para aprendizaje de máquina)<br/> Repositorio del codigo: https://github.com/josjimenezja/Prediccion_del_precio_de_la_vivienda_en_Taiwan <br/><br/>Semestre 2021-01 **"
+output: html_document
+---
+
+```{r setup, warning=FALSE,include=FALSE}
+#install.packages("glmnet")
+#install.packages("caret")
+#install.packages('xgboost')
+#install.packages("DiagrammeR")
+#install.packages('e1071')
+#install.packages('rpart')
+library(glmnet)
+library(caTools)
+library(ggplot2)
+library(caret)
+library(caTools)
+library(randomForest)
+library(knitr)
+require(xgboost)
+library(DiagrammeR)
+library(neuralnet)  
+library('e1071')
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Planteamiento del problema 
+
+La predición del precio de vivienda basado en Xi variables independientes, ha sido una problemática altamente ilustrativa en el sector inmobiliario durante los últimos años. Esta aplicación requiere técnicas Estadísticas para evaluar la relación entre variables y modelos de Aprendizaje de Máquinas para calcular la precisión de la predicción.
+
+En esta actividad, desarrollaremos 6 modelos de Aprendizaje de Máquinas basados en una base de datos sobre precios de vivienda en Taiwan, a continuación se define las variables y se describe el procedimiento. 
+
+* X1: fecha de la transacción (por ejemplo 2013.250=2013 Marzo, * 2013.500=2013 Junio, etc.)
+* X2: edad de la casa en años
+* X3: distancial al MRT (transporte masivo) más cercano en metros
+* X4: número de tiendas de conveniencia en el vecindario (entero)
+* X5: latitud (unidad: grados)
+* X6: longitude (unidad: grados)
+* Y: precio por unidad de área (10000 Nuevos dólares taiwaneses/ 3.3 m2)
+
+```{r echo=FALSE}
+datos <- read.csv("real_estate_valuation_dataset.csv", sep = ";", dec = ",")
+datos_subc <-subset(datos, select = c("X2","X3","X4","X5","X6","Y"))
+head(datos_subc)
+```
+
+### Análisis Estadístico 
+
+Inicialmente, vamos a representar la matriz de correlación de cada variable y su respectivo diagrama de dispersión de los datos. Podemos observar en la siguiente gráfica que, la mayor correlación presente en la muestra es entre las variables X3 y X6, la cual es de 0.81.Por ende, se decide eliminar una de las 2 varibles ya que  si se tienen encuenta ambas variables no le suministra información relevante a los modelos. En este sentido, la mayor correlación entre la variable dependiente Y, se da con la variable X3, dando un primer indício sobre la importancia de esta variable para el modelo. 
+
+
+```{r echo=FALSE}
+
+panel.hist <- function(x, ...)
+{
+  usr <- par("usr"); on.exit(par(usr))
+  par(usr = c(usr[1:2], 0, 1.5) )
+  h <- hist(x, plot = FALSE)
+  breaks <- h$breaks; nB <- length(breaks)
+  y <- h$counts; y <- y/max(y)
+  rect(breaks[-nB], 0, breaks[-1], y, col = "cyan", ...)
+}
+
+#calcular la correlación 
+panel.cor <- function(x, y, digits = 2, prefix = "", cex.cor, ...)
+{
+  usr <- par("usr"); on.exit(par(usr))
+  par(usr = c(0, 1, 0, 1))
+  r <- abs(cor(x, y))
+  txt <- format(c(r, 0.123456789), digits = digits)[1]
+  txt <- paste0(prefix, txt)
+  if(missing(cex.cor)) cex.cor <- 0.8/strwidth(txt)
+  text(0.5, 0.5, txt, cex = cex.cor * r)
+}
+
+#pairs(datos, upper.panel = panel.cor, lower.panel = panel.hist)
+pairs(datos_subc, upper.panel = panel.cor, lower.panel = panel.smooth)
+
+```
+
+Hacemos una exploración de las variables predictoras para mirar si se observa alguna relación en escala logarítmica. La mayor relación lineal la encontramos al pasar X3 a escala logarítmica con menor varianza cuando la distancia al MRT aumenta y el precio disminuye.
+
+```{r echo=FALSE}
+datos_subc <-  subset(datos, select = c("X2","X3","X4","X5","Y"))
+
+plot(datos_subc$X3,datos$Y, main = "Relación distancia MRT Vs Precio", xlab="distancia MRT", ylab="precio")
+plot(datos_subc$X3,datos$Y, main = "Relación distancia MRT Vs Precio - escala log x", log= "x", xlab="distancia MRT", ylab="precio")
+plot(datos_subc$X3,datos$Y, main = "Relación distancia MRT Vs Precio - escala log xy", log= "xy", xlab="distancia MRT", ylab="precio")
+```
+
+
+Vale la pena ajustar los datos a una escala logarítmica con el fin de analizar el comportamiento de las variables. Podemos observar que todas las variables tienen una alta correlación con la función logaritmica de ella misma. No obstante, se puede apreciar que la correlación entre variables independientes se maximiza bajo esta escala.  
+
+
+```{r echo=FALSE}
+#Ajustamos los datos a escala logaritmica
+datos_subc$X2log <- log(datos_subc$X2+1)
+datos_subc$X3log <- log(datos_subc$X3)
+datos_subc$X4log <- log(datos_subc$X4+1)
+datos_subc$X5log <- log(datos_subc$X5)
+datos_subc$Ylog <- log(datos_subc$Y)
+
+#Hacemos el escalamiento de las variables
+datos_subc_scale <- scale(datos_subc, center=TRUE, scale=TRUE)#Escala a media cero
+medias <- attr(datos_subc_scale, "scaled:center")
+desv_est <- attr(datos_subc_scale, "scaled:scale")
+datos_subc_scale <- as.data.frame(datos_subc_scale)
+
+#Hacemos el escalamiento solo de Y
+datos_subc_scale_Ylog <- scale(datos_subc$Ylog, center=TRUE, scale=TRUE)#Escala a media cero
+media_Y <- attr(datos_subc_scale_Ylog, "scaled:center")
+desv_est_Y <- attr(datos_subc_scale_Ylog, "scaled:scale")
+
+pairs(datos_subc, upper.panel = panel.cor, lower.panel = panel.smooth)
+
+```
+
+Ahora bien, teniendo en cuenta el análisis anterior, procederemos a entrar en detalle en cada uno de los 6 modelos de aprendizaje de máquinas ejecutados.   
+
+## Resultados
+
+### Regresión Lineal 
+
+#### Regresión Lineal Clásica
+
+Al analizar el modelo de predicción lineal, observamos que los coeficientes estimados de los valores estimados de X2log(años de la vivienda) y X3log(distancia al RTM) dan negativo, lo que quiere decir que a medida que crecen ambas variables, el valor predicho Ylog (precio) decrece. Por el contrario, el valor estimado de X4log(número de tiendas) crece, el precio de la vivienda también crece al igual que la latitud. 
+ 
+```{r echo=FALSE}
+set.seed(1)
+sub_datos = subset(datos_subc_scale, select = c(X2log, X3log, X4log, X5log, Ylog))
+
+# se determinar el porcentaje validación igual al 20% de los datos
+sample = sample.split(sub_datos$Ylog, SplitRatio = 0.8) 
+train = subset(sub_datos, sample == TRUE)
+test = subset(sub_datos, sample == FALSE)
+
+#Ajuste del Modelo
+modelo_lm <- lm(Ylog~X2log+X3log+X4log+X5log, data= train )
+prueba<-summary(modelo_lm)
+kable(prueba$coefficients)
+
+# Predición del modelo con los datos normalizados y en escala logarítmica
+pred_lm <- predict(modelo_lm, newdata = test)
+RMSE_pred_lm = RMSE(pred_lm, test$Ylog)
+
+# desnormalizar la predicción 
+pred_lm_real <- pred_lm* attr(datos_subc_scale_Ylog, 'scaled:scale') + attr(datos_subc_scale_Ylog, 'scaled:center')[col(as.matrix(pred_lm))]
+pred_lm_real_sin_log <- exp(pred_lm_real)
+
+# Eliminar la escala logarítmica
+label_log <- test$Ylog* attr(datos_subc_scale_Ylog, 'scaled:scale') + attr(datos_subc_scale_Ylog, 'scaled:center')[col(as.matrix(pred_lm))]
+label_test <- exp(label_log)
+
+```
+
+También observamos que la mayor relación lineal se da con X3 al tener en valor absoluto el coeficiente más alto (0.5). Acá vemos el impacto de pasar los datos a escala logarítmica donde identificamos que esta misma variable en escala logarítmica (X3log) mostraba una tendencia lineal más pronunciada que las demás predictores
+
+El desempeño del modelo lo evaluamos por medio del RMSE, para el caso de la regresión Lineal es:
+
+RMSE_Regresión_Clasica:
+```{r echo=FALSE}
+# RMSE en la escala original de los datos
+RMSE_pred_lm_real<-RMSE(pred_lm_real_sin_log, label_test)
+RMSE_pred_lm_real
+```
+
+#### Regresión Lineal ELASTIC NET
+
+A continuación se representa la gráfica de Regresión Lineal tipo Elastic Net, la cual busca encontrar los parametros alpha y lambda que minimicen el RMSE, Podemos observar en el eje X los valores de alpha y en el eje Y el RMSE. Cada línea corresponde a los diferentes valores de lambda con los que se entrenó el modelo, encontrando que el menor RMSE encontrado fue con la combinación de alpha y lambda igual a 0.85 y 0.00365 respectivamente. Al ser alpha cercano a 1 nos indica que la naturaleza de Elastic Net se asocia más con la regresión de tipo Lasso, es decir que fuerza los coeficientes de las variables predictoras tiendan a cero con el fin de excluir los predictores menos relevantes.
+
+
+```{r echo=FALSE}
+
+# creación de X y Y datasets
+X <- cbind(train$X2log,train$X3log, train$X4log, train$X5log)  
+colnames(X) <- c("X2log", "X3log", "X4log", "X5log")
+Y <- train$Ylog
+
+X_test <- cbind(test$X2log,test$X3log, test$X4log, test$X5log)  
+colnames(X_test) <- c("X2log", "X3log", "X4log", "X5log")
+Y_test <- test$Ylog
+
+# Entrenamiento del modelo
+elastic_model <- train(X, Y, method = "glmnet", preProcess = c("center", "scale"), tuneLength = 25) 
+Losmejores<-elastic_model$bestTune
+```
+
+```{r echo=FALSE}
+kable(Losmejores)
+knitr::opts_chunk$set(warning = TRUE, message = TRUE) 
+```
+
+```{r echo=FALSE}
+plot(elastic_model, main = "Regresión Elastic Net")
+
+```
+
+Extrayendo los coeficientes del modelo de Elastic Net, vemos nuevamente que la variable X3 en términos abosultos presenta el mayor coeficiente, y por tanto nos indica que es la variable predictora con mayor impacto en el precio de venta.
+
+```{r echo=FALSE}
+#Coeficientes del modelo
+coef(elastic_model$finalModel,elastic_model$bestTune$lambda)
+
+# Model Prediction
+pred_elastic <- predict(elastic_model, newdata = test)
+RMSE_pred_elastic = RMSE(pred_elastic, Y_test)
+#RMSE_pred_elastic
+
+# desnormalizar la predicción y eliminar la escala logarítmica
+pred_elastic_real <- pred_elastic* attr(datos_subc_scale_Ylog, 'scaled:scale') + attr(datos_subc_scale_Ylog, 'scaled:center')
+pred_elastic_real_sin_log <- exp(pred_elastic_real)
+
+#label_test son los datos Y del testeo pero desnormalizados y sin escala logarítmica
+
+# RMSE en la escala original de los datos
+RMSE_pred_elastic_real = RMSE(pred_elastic_real_sin_log, label_test)
+```
+RMSE_Regresión_Elastic_Net
+```{r echo=FALSE}
+RMSE_pred_elastic_real
+```
+
+Los siguientes dos métodos de aprendizaje automático tienen como base el algoritmo de arboles de decisión, la naturaleza del clasificador permite prescindir de la normalización o un pre procesamiento de las variables, esto debido a que el proceso consiste básicamente en hacer split’s sobre variables con un umbral definido.
+
+
+### RANDOM FOREST
+
+Es un ensamble de arboles de decisión, se generan varios árboles con subsets de datos y se les asignan pesos dependiendo de la calidad de la predicción de cada uno.
+
+```{r echo=FALSE}
+names(datos)<-c('Numero', 'Fechatransaccion', 'Edadcasa', 'MRTDistance', 'NTiendas', 'Latitud', 'Longitud', 'Priceperarea')
+
+#Random Forest no necesita normalización porque es simplemente un proceso de spliteo sobre datos
+sub_datos_rf <-  subset(datos, select = c('Edadcasa', 'MRTDistance', 'NTiendas', 'Latitud', 'Longitud', 'Priceperarea'))
+
+#split en datos de muestra y validación
+sample = sample.split(sub_datos_rf$Priceperarea, SplitRatio = 0.8)
+train = subset(sub_datos_rf, sample == TRUE)
+test  = subset(sub_datos_rf, sample == FALSE)
+```
+
+Esta técnica permite identificar la importancia que pueden tener cada característica sobre la predicción, lo anterior depende de que tanto decae el índice de Gini con cada iteración (o split), entre mayor sea el decaimiento del índice de Gini de característica a característica, mas importante será.  De alguna forma representa que tan bien puedo describir los datos a partir de esa variable.
+
+```{r echo=FALSE}
+# Se crea el modelo 
+rf <- randomForest(Priceperarea ~ .,data=train)
+
+plot(rf, main = 'Random Forest') #Sobre los datos originales, ojo
+
+y<-test$Priceperarea
+y_pred<-predict(rf, test[-6])
+
+```
+
+Se puede observar que la variable con mayor importancia es el MRT (Distancia a Transporte Masivo) y la de menor importancia el número de tiendas. Es decir que, para la predicción, se puede describir mucho más el precio en función del MRT que de las demás variables.
+
+
+```{r echo=FALSE}
+##Funciona
+arrayRf <- array(c(y,y_pred),dim = c(83,2))
+mse<-mean( (y - y_pred)^2)
+
+varImpPlot(rf)
+```
+
+RMSE_Random_Forest:
+
+```{r}
+rmse_rf<-RMSE(y_pred, y)
+rmse_rf
+
+```
+
+### XGBoost
+
+XGBoost está basado en arboles de decisión y utiliza una estructura de Gradient Boosting. Donde cada árbol trata de predecir enfocándose en aquellas cosas que el anterior predijo de forma incorrecta, teniendo en cuenta tanto el feedback de las iteraciones previas como la minimización del error utilizando gradiente descendente.
+
+```{r echo=FALSE}
+y_train<-train$Priceperarea
+
+XGBmodel<-xgboost(data=as.matrix(train[-6]), label=y_train, max.depth = 2, eta = 1, nthread = 2, nrounds = 10, objective = "reg:squarederror", verbose = 0)
+XGBpred<-predict(XGBmodel, as.matrix(test[-6]))
+arrayXGB <- array(c(y, XGBpred),dim = c(83,2))
+
+xgb.plot.tree(model = XGBmodel)
+
+```
+
+También es posible obtener la importancia relativa de cada variable utilizando este método. 
+
+```{r, echo=FALSE}
+importance_matrix<-xgb.importance(colnames(train[-6]), model = XGBmodel)
+xgb.plot.importance(importance_matrix,rel_to_first = TRUE, xlab = 'Relative importance' )
+```
+
+Se puede observar que el orden de importancia de las variables descrito en Random Forest es el mismo que XGBoost, sin embargo, la diferencia en importancia que existe entre la primera variable MRT y el resto es mucho mayor que en Random Forest.
+
+
+RMSE_XGBoost:
+```{r echo=FALSE}
+rmse_xgb<-RMSE(XGBpred, y)
+rmse_xgb
+```
+
+
+### SVM
+
+SVM se fundamenta en encontrar los hiperplanos que mejor dividan el dataset, a los hiperplanos se les agrega unos vectores cercanos que en conjunto hacen las veces de margen sobre para los datos, permitiendo m{a flexibilidad y control sobre el modelo.
+
+la librería utilizada por defecto escala los datos, el resultado de utilizar el algoritmo es el siguiente:
+
+```{r echo=FALSE}
+
+set.seed(1)
+datos <- read.csv("real_estate_valuation_dataset.csv", 
+                  sep = ";", dec = ",")
+names(datos)<-c('Numero', 'Fechatransaccion', 'Edadcasa', 'MRTDistance', 'NTiendas', 'Latitud', 'Longitud', 'Priceperarea')
+sub_datos_svm <-  subset(datos, select = c('Edadcasa', 'MRTDistance', 'NTiendas', 'Latitud', 'Longitud', 'Priceperarea'))
+sample = sample.split(sub_datos_svm$Priceperarea, SplitRatio = 0.8)
+train = subset(sub_datos_svm, sample == TRUE)
+test  = subset(sub_datos_svm, sample == FALSE)
+
+svm_model<-svm(Priceperarea ~ ., data = train)
+svm_pred<-predict(svm_model, test[-6])
+
+#Overlay SVM Predictions over GT
+plot(test$MRTDistance, test$Priceperarea, col = 'darkgreen', pch=16, main = 'SVM Prediction Model', xlab = 'MRT Distance' ,ylab = 'Price per area')
+points(test$MRTDistance, svm_pred, col='blue', pch=16)
+legend(2000, 70, legend=c("Actual Price", "Predicted Price"),col=c("darkgreen", "blue"), pch=16, cex=0.8)
+
+```
+
+RMSE_SVM:
+
+```{r echo=FALSE}
+rmse_svm<-RMSE(svm_pred, test$Priceperarea)
+rmse_svm
+```
+
+SVM tiene varios parametros cruciales(costo, gamma y epsilon), a continuación se busca encontrar los parametros optimos para el modelo, a esta practica se le conoce como fine tuning.
+
+```{r echo=FALSE}
+tuneResult<-tune(svm, Priceperarea ~., data = as.data.frame(train), ranges = list(epsilon = seq(0,1,0.1), cost = 2^(seq(0.5,8,.5))))
+plot(tuneResult)
+
+enhanced_svm_model<-tuneResult$best.model
+enh_svm_pred<-predict(enhanced_svm_model, test[-6])
+
+svm_pred_t<-predict(svm_model, train[-6])
+enh_svm_pred_t<-predict(enhanced_svm_model, train[-6])
+  
+rmse_svm_t<-RMSE(svm_pred_t, train$Priceperarea)#7.09
+enh_rmse_svm_t<-RMSE(enh_svm_pred_t, train$Priceperarea)#7.04
+
+rmse_svm<-RMSE(svm_pred, test$Priceperarea)#7.09
+enh_rmse_svm<-RMSE(enh_svm_pred, test$Priceperarea)#7.04
+```
+
+
+A continuación se puede observar la evolución de las predicciones sobre el conjunto de testeo, comparandose con la variable de mayor importancia para el problema (MRT)  
+
+
+```{r echo=FALSE}
+
+plot(test$MRTDistance, test$Priceperarea, col = 'darkgreen', pch=16, main = 'SVM Prediction Model', xlab = 'MRT Distance' ,ylab = 'Price per area', cex=0.8)
+points(test$MRTDistance, svm_pred, col='blue', pch=16, cex=0.8)
+points(test$MRTDistance, enh_svm_pred, col='orange', pch=16, cex=0.8)
+legend(2000, 70, legend=c("Actual Price", "Predicted Price", "Enhanced Prediction"),col=c("darkgreen", "blue", "orange"), pch=16, cex=0.8)
+
+```
+
+
+RMSE_TUNED_SVM:
+```{r echo=FALSE}
+enh_rmse_svm
+```
+
+Se puede observar que a pesar del fine tunning no se evidencia una mejoría notable en terminos de RMSE, lo anterior puede entenderse por el tamaño del dataset que se está utilizando. Un fine tunning tiene más sentido cuando se están abordando problemas con volumenes más grandes. Para este escenario el desempeño mejora ligeramente, el uso o no de técnicas de fine tuning dependera en gran medida de las necesidades del negocio, del costo computacional y de la importancia que pueda asociarse al error, aunque en este escenario parece no evidenciarse, en algunos casos por sútil que pueda ser la mejora marcaría una diferencia importante sobre el funcionamiento. 
+
+### REDES NEURONALES
+
+Finalmente, el último modelo evauado son las Redes Neuronales, su arquitectura está definida por 1 capa oculta y 2 neuronas, la funcion de activacion es tipo logistica. Se puede observar que, X3 posee el mayor peso en la red, lo cual indica su importancia dentro de la estructura.
+
+```{r echo=FALSE}
+#Datos 
+datos<- read.csv("real_estate_valuation_dataset.csv", sep=";", dec = ",")
+datos <-  subset(datos, select = c("X2","X3","X4","X5","Y"))
+n <- nrow(datos)
+muestra<- sample(n, n * .80)
+datos_train<- datos[muestra, ]
+datos_test<- datos[-muestra, ]
+
+#Normalización de variables
+maxs <- apply(datos, 2, max) 
+mins <- apply(datos, 2, min) 
+datos_scaled <- as.data.frame(scale(datos, center=mins, scale=maxs-mins))
+datos_train_scaled<-datos_scaled[muestra, ]
+datos_test_scaled<-datos_scaled[-muestra, ]
+
+#Modelo de ANN
+
+ann <- neuralnet(Y ~ X2+X3+X4+X5, data=datos_train_scaled, hidden=c(2, 1), threshold=0.01)
+plot(ann, rep="best")
+#names(ann)
+#ann$act.fct # Activation function
+#unlist(ann$weights)  # Obtener en formas de vector los weigths=pesos
+
+```
+
+La siguiente tabla, recopila los datos reales, predecidos y calcula el error para cada observación. Por último, se puede analizar graficamente la dispersión de los datos predecidos Vs Reales. 
+
+```{r echo=FALSE}
+
+#Predicción
+datos_pred_scaled <- compute(x=ann, within(datos_test_scaled,rm(Y)))
+prediciones<-data.frame(Real = datos_test_scaled$Y, Predicted = datos_pred_scaled$net.result, Error = abs(datos_test_scaled$Y - datos_pred_scaled$net.result) / datos_test_scaled$Y)
+head(prediciones)
+
+#Transformación Inversa
+datos_pred <- datos_pred_scaled$net.result*(max(datos$Y)-min(datos$Y))+min(datos$Y)
+datos_real<- (datos_test_scaled$Y)*(max(datos$Y)-min(datos$Y))+min(datos$Y)
+
+#Métricas
+mse <- sum(((datos_real - datos_pred)^2)/nrow(datos_test_scaled))
+rmse_ann<-sqrt(mse)
+
+#GRAFICOS
+# Errores
+qplot(x=datos_real, y=datos_pred, geom=c("point","smooth"), method="lm", 
+      main=paste("Real Vs Prediccion...RMSE Redes Neuronales=", round(rmse_ann,2)))
+```
+
+
+### Resumen de los Modelos
+
+La siguiente grafica recopila la informacion del RMSE obtenido de cada metodo. En este caso, el metodo de Redes Neuronales es el que presenta un menor error de precision en los datos. 
+
+```{r, echo=FALSE}
+
+errors_coef<-cbind(RMSE_pred_elastic_real, RMSE_pred_lm_real, rmse_rf, rmse_xgb, rmse_svm, enh_rmse_svm, rmse_ann)  
+
+err_labels<-as.factor(c('EM', 'LM', 'RF', 'XGB', 'SVM', 'U_SVM', 'NN'))
+
+plot(err_labels, t(errors_coef), xlab='Models', ylab='RMSE')
+```
+
+### Preguntas adicionales
+
+1.	¿Que variables tienen el mayor impacto en el precio de la vivienda? ¿Como aporta cada modelo al conocimiento de este impacto?
+
+En la matriz de correlación observamos que la distancia del sistema de transporte masivo tiene un mayor impacto sobre el precio de la vivienda con una correlación de 0,67. Así mismo, vimos como en las regresiones lineales el coeficiente de esta variable predictora (X3) en términos absolutos es mayor en comparación a los demás, reflejando un mayor peso e impacto sobre el precio de la vivienda. Dado que el coeficiente es negativo, nos indica una relación inversamente proporcional, en el caso de Random Forest y XGBoost se puede identificar la variable X3(MRT) como la de mayor importancia, en el caso de la red neuronal también se resalta los pesos de la misma variable como los más altos dentro de la arquitectura. Las observaciones que se pueden hacer desde cada modelo son coherentes
+
+2.	¿Cual es el mejor modelo entre los usados para resolver este problema? ¿Que criterios se pueden utilizar para responder a esta pregunta?
+
+El desempeño de los diferentes modelos se midio por medio del RMSE. Comparando los valores obtenidos observamos que el modelo con mejores resultados fue el de Redes Neuronales con un RMSE de 6.35, seguido por los modelos de SVM y finalmente los de regresión lineal.
+Otros criterios de evaluacion a utilizar para medir el desempeño son: - Accuracy: con qué frecuencia es correcto el clasificador. En vez de validar el menor error como lo hicimos con el RMSE, será determinar el de mayor exactitud. - Precision: Cuando predice si, con qué frecuencia es correcto. - Recall: Cuando en realidad es un si, con qué frecuencia predice un si - F1 Score: es un promedio entre el resultado del Recall y Precisión, donde la puntuación del F1 alcanza su mejor valor en 1 (Precision y Recall perfectos) y el peor en 0.
+ 
+ 
+## Bibliografia
+* https://www.geeksforgeeks.org/elastic-net-regression-in-r-programming/
+ 
+* https://bookdown.org/content/2031/ensambladores-random-forest-parte-
+
+* https://xgboost.readthedocs.io/en/latest/R-package/xgboostPresentation.html
+
+* https://yuasaavedraco.github.io/Docs/Redes_Neuronales_con_R.html
+
+* http://apuntes-r.blogspot.com/2015/12/regresion-con-red-neuronal.html
